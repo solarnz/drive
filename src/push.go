@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/odeke-em/drive/config"
-    "github.com/odeke-em/dts/trie"
+	"github.com/odeke-em/dts/trie"
 	ration "github.com/odeke-em/rationer"
 )
 
@@ -246,32 +246,32 @@ func (g *Commands) playPushChanges(cl []*Change, opMap *map[Operation]sizeCounte
 		}
 	}()
 
-    capacity := uint64(40)
+	capacity := uint64(100)
 	rationer := ration.NewRationer(capacity)
 
 	loader := rationer.Run()
 
-    addTrie := trie.New(trie.AsciiAlphabet)
-    delTrie := trie.New(trie.AsciiAlphabet)
-    modTrie := trie.New(trie.AsciiAlphabet)
+	addTrie := trie.New(trie.AsciiAlphabet)
+	delTrie := trie.New(trie.AsciiAlphabet)
+	modTrie := trie.New(trie.AsciiAlphabet)
 
 	for _, c := range cl {
 		switch c.Op() {
 		case OpMod:
-            modTrie.Set(c.Path, c)
+			modTrie.Set(c.Path, c)
 		case OpModConflict:
-            modTrie.Set(c.Path, c)
+			modTrie.Set(c.Path, c)
 		case OpAdd:
-            addTrie.Set(c.Path, c)
+			addTrie.Set(c.Path, c)
 		case OpDelete:
-            delTrie.Set(c.Path, c)
+			delTrie.Set(c.Path, c)
 		}
 	}
 
-    // Schedule them
-    trieOperator(addTrie, g.remoteAdd, loader)
-    trieOperator(modTrie, g.remoteMod, loader)
-    trieOperator(delTrie, g.remoteDelete, loader)
+	// Schedule them
+	trieOperator(addTrie, g.remoteAdd, loader)
+	trieOperator(modTrie, g.remoteMod, loader)
+	trieOperator(delTrie, g.remoteDelete, loader)
 
 	loader <- ration.Sentinel
 	rationer.Wait()
@@ -281,22 +281,25 @@ func (g *Commands) playPushChanges(cl []*Change, opMap *map[Operation]sizeCounte
 }
 
 func trieOperator(t *trie.Trie, f func(*Change) error, loader chan interface{}) {
-    t.Tag(trie.PotentialTerminalDir, true)
+	fn := trie.HasEOS
+	t.Tag(fn, true)
+	walk := t.Match(fn)
 
-    walk := t.Match(trie.PotentialTerminalDir)
-
-    for divNode := range walk {
-        loader <- func (dnn **trie.TrieNode) ration.Job {
-            it := *dnn
-            return func () interface{} {
-                cast, ok := it.Data.(*Change)
-                if !ok {
-                    return fmt.Errorf("cast to \"Change\" failed")
-                }
-                return f(cast)
-            }
-        }(&divNode)
-    }
+	for divNode := range walk {
+		if divNode.Data == nil {
+			continue
+		}
+		loader <- func(dnn **trie.TrieNode) ration.Job {
+			it := *dnn
+			return func() interface{} {
+				cast, ok := it.Data.(*Change)
+				if !ok {
+					return fmt.Errorf("cast to \"Change\" failed")
+				}
+				return f(cast)
+			}
+		}(&divNode)
+	}
 }
 
 func lonePush(g *Commands, parent, absPath, path string) (cl []*Change, err error) {
@@ -411,12 +414,12 @@ func (g *Commands) remoteUntrash(change *Change) (err error) {
 	return
 }
 
-func (g *Commands) remoteDelete(change *Change) (err error) {
+func remoteRemover(g *Commands, change *Change, fn func(string) error) (err error) {
 	defer func() {
 		g.taskAdd(change.Dest.Size)
 	}()
 
-	err = g.rem.Trash(change.Dest.Id)
+	err = fn(change.Dest.Id)
 	if err != nil {
 		return
 	}
@@ -426,6 +429,14 @@ func (g *Commands) remoteDelete(change *Change) (err error) {
 		g.log.LogErrf("%s \"%s\": remove indexfile %v\n", change.Path, change.Dest.Id, rmErr)
 	}
 	return
+}
+
+func (g *Commands) remoteTrash(change *Change) error {
+	return remoteRemover(g, change, g.rem.Trash)
+}
+
+func (g *Commands) remoteDelete(change *Change) error {
+	return remoteRemover(g, change, g.rem.Delete)
 }
 
 func (g *Commands) remoteMkdirAll(d string) (file *File, err error) {
@@ -490,12 +501,16 @@ func list(context *config.Context, p string, hidden bool, ignore *regexp.Regexp)
 			if ignore != nil && ignore.Match([]byte(file.Name())) {
 				continue
 			}
-			if !isHidden(file.Name(), hidden) {
-				fileChan <- NewLocalFile(gopath.Join(absPath, file.Name()), file)
+			if isHidden(file.Name(), hidden) {
+				continue
 			}
 
 			symlink := (file.Mode() & os.ModeSymlink) != 0
-			if symlink {
+
+			if !symlink {
+				resPath := gopath.Join(absPath, file.Name())
+				fileChan <- NewLocalFile(resPath, file)
+			} else {
 				symAbsPath := gopath.Join(absPath, file.Name())
 				var symResolvPath string
 				symResolvPath, err = filepath.EvalSymlinks(symAbsPath)
@@ -508,7 +523,7 @@ func list(context *config.Context, p string, hidden bool, ignore *regexp.Regexp)
 				if err != nil {
 					continue
 				}
-				fileChan <- NewLocalFile(symAbsPath, symInfo)
+				fileChan <- NewLocalFile(symResolvPath, symInfo)
 			}
 		}
 		close(fileChan)
