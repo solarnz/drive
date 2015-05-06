@@ -76,12 +76,8 @@ func (c *Context) AbsPathOf(fileOrDirPath string) string {
 	return path.Join(c.AbsPath, fileOrDirPath)
 }
 
-func (c *Context) Read() (err error) {
-	var data []byte
-	if data, err = ioutil.ReadFile(credentialsPath(c.AbsPath)); err != nil {
-		return
-	}
-	return json.Unmarshal(data, c)
+func (c *Context) Read() ([]byte, error) {
+	return ioutil.ReadFile(credentialsPath(c.AbsPath))
 }
 
 func (c *Context) DeserializeIndex(dir, path string) (*Index, error) {
@@ -133,10 +129,8 @@ func Discover(currentAbsPath string) (context *Context, err error) {
 	if !found {
 		return nil, errors.New("no gd context is found; use gd init")
 	}
+
 	context = &Context{AbsPath: p}
-	if err = context.Read(); err != nil {
-		return nil, err
-	}
 	indicesPath := IndicesAbsPath(context.AbsPath, "")
 	err = os.MkdirAll(indicesPath, 0755)
 	return

@@ -25,7 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"code.google.com/p/goauth2/oauth"
+	"golang.org/x/oauth2"
+	google "golang.org/x/oauth2/google"
+
 	"github.com/odeke-em/drive/config"
 	drive "github.com/odeke-em/google-api-go-client/drive/v2"
 	"github.com/odeke-em/statos"
@@ -33,17 +35,14 @@ import (
 
 const (
 	// Google OAuth 2.0 service URLs
-	GoogleOAuth2AuthURL  = "https://accounts.google.com/o/oauth2/auth"
-	GoogleOAuth2TokenURL = "https://accounts.google.com/o/oauth2/token"
+	googleAuthURL  = "https://accounts.google.com/o/oauth2/auth"
+	googleTokenURL = "https://accounts.google.com/o/oauth2/token"
 
 	// OAuth 2.0 OOB redirect URL for authorization.
 	RedirectURL = "urn:ietf:wg:oauth:2.0:oob"
 
 	// OAuth 2.0 full Drive scope used for authorization.
 	DriveScope = "https://www.googleapis.com/auth/drive"
-
-	// OAuth 2.0 access type for offline/refresh access.
-	AccessType = "offline"
 
 	// Google Drive webpage host
 	DriveResourceHostURL = "https://googledrive.com/host/"
@@ -70,19 +69,33 @@ var (
 )
 
 type Remote struct {
-	transport    *oauth.Transport
+	client       *http.Client
 	service      *drive.Service
 	progressChan chan int
 }
 
 func NewRemoteContext(context *config.Context) *Remote {
-	transport := newTransport(context)
-	service, _ := drive.New(transport.Client())
+	client, err := google.DefaultClient(oauth2.NoContext, DriveScope)
+	fmt.Println("err here", err, client)
+
+	var oauth2Config *oauth2.Config
+	data, dErr := context.Read()
+	if dErr != nil {
+		fmt.Println(dErr)
+	}
+	oauth2Config, err = google.ConfigFromJSON(data, DriveScope)
+	fmt.Println(oauth2Config, err)
+
+	if err != nil {
+		os.Exit(-1)
+	}
+
+	service, _ := drive.New(client)
 	progressChan := make(chan int)
 	return &Remote{
 		progressChan: progressChan,
 		service:      service,
-		transport:    transport,
+		client:       client,
 	}
 }
 
@@ -144,14 +157,25 @@ func (r *Remote) change(changeId string) (*drive.Change, error) {
 	return r.service.Changes.Get(changeId).Do()
 }
 
-func RetrieveRefreshToken(context *config.Context) (string, error) {
-	transport := newTransport(context)
-	url := transport.Config.AuthCodeURL("")
+func RetrieveRefreshToken(context *config.Context) (refreshToken string, err error) {
+	var data []byte
+	data, err = context.Read()
+	if err != nil {
+		return
+	}
+
+	var oauth2Config *oauth2.Config
+	oauth2Config, err = google.ConfigFromJSON(data, DriveScope)
+	if err != nil {
+		return
+	}
+
+	url := oauth2Config.AuthCodeURL("", oauth2.AccessTypeOffline)
 	fmt.Printf("Visit this URL to get an authorization code\n%s\n", url)
 
 	code := prompt(os.Stdin, os.Stdout, "Paste the authorization code: ")
 
-	token, err := transport.Exchange(code)
+	token, err := oauth2Config.Exchange(oauth2.NoContext, code)
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +346,7 @@ func (r *Remote) Download(id string, exportURL string) (io.ReadCloser, error) {
 	} else {
 		url = exportURL
 	}
-	resp, err := r.transport.Client().Get(url)
+	resp, err := r.client.Get(url)
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return resp.Body, err
 	}
@@ -649,26 +673,10 @@ func (r *Remote) findByPathTrashed(parentId string, p []string) (file *File, err
 	return r.findByPathRecvRaw(parentId, p, true)
 }
 
-func newAuthConfig(context *config.Context) *oauth.Config {
-	return &oauth.Config{
-		ClientId:     context.ClientId,
-		ClientSecret: context.ClientSecret,
-		AuthURL:      GoogleOAuth2AuthURL,
-		TokenURL:     GoogleOAuth2TokenURL,
-		RedirectURL:  RedirectURL,
-		AccessType:   AccessType,
-		Scope:        DriveScope,
+func newAuthConfig(context *config.Context) (*oauth2.Config, error) {
+	jsonKey, err := context.Read()
+	if err != nil {
+		return nil, err
 	}
-}
-
-func newTransport(context *config.Context) *oauth.Transport {
-	return &oauth.Transport{
-		Config:    newAuthConfig(context),
-		Transport: http.DefaultTransport,
-		Token: &oauth.Token{
-			RefreshToken: context.RefreshToken,
-			// TODO: Fix this temporary bad hack with periodic refresh
-			Expiry: time.Now().Add(time.Hour * 10),
-		},
-	}
+	return google.ConfigFromJSON(jsonKey, DriveScope)
 }
